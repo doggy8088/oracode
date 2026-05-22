@@ -51,3 +51,8 @@ oracode \
 如果需要保留加上雙引號的識別字，請使用 `--keep-quotes`。
 
 所有 CLI 選項也可以透過 `ORACODE_*` 環境變數提供，例如 `ORACODE_PASSWORD`。
+
+## 技術文件
+
+- [技術架構與實作說明](docs/TECHNICAL.md)
+- [產品需求與開發藍圖](docs/PRD.md)
