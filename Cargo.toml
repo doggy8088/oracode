@@ -1,6 +1,6 @@
 [package]
 name = "oracode"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Database-as-code CLI for exporting clean, Git-friendly Oracle DDL."
 license = "MIT"
