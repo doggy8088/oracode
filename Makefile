@@ -15,15 +15,15 @@ ORACODE_ARGS := --host $(HOST) --port $(PORT) --user $(DB_USER) --password $(PAS
 .PHONY: help run test build release clean oracle-up oracle-down oracle-logs
 
 help:
-	@echo "Targets:"
-	@echo "  make run         Run oracode against the local/sample Oracle database"
-	@echo "  make test        Run Rust tests"
-	@echo "  make build       Build debug binary"
-	@echo "  make release     Build optimized release binary"
-	@echo "  make clean       Remove Cargo build artifacts"
-	@echo "  make oracle-up   Start local Oracle XE container"
-	@echo "  make oracle-down Stop and remove local Oracle XE container"
-	@echo "  make oracle-logs Tail local Oracle XE logs"
+	@echo "可用目標："
+	@echo "  make run         使用本機/範例 Oracle 資料庫執行 oracode"
+	@echo "  make test        執行 Rust 測試"
+	@echo "  make build       建置除錯版本二進位檔"
+	@echo "  make release     建置最佳化發行版本二進位檔"
+	@echo "  make clean       移除 Cargo 建置產物"
+	@echo "  make oracle-up   啟動本機 Oracle XE 容器"
+	@echo "  make oracle-down 停止並移除本機 Oracle XE 容器"
+	@echo "  make oracle-logs 追蹤本機 Oracle XE 日誌"
 
 run:
 	DYLD_LIBRARY_PATH="$(ORACLE_CLIENT_DIR)" LD_LIBRARY_PATH="$(ORACLE_CLIENT_DIR)" cargo run -- $(ORACODE_ARGS)

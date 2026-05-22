@@ -1,40 +1,40 @@
 # oracode
 
-`oracode` exports Oracle database objects as clean, stable, Git-friendly DDL files.
+`oracode` 可將 Oracle 資料庫物件匯出成乾淨、穩定且適合 Git 版本控管的 DDL 檔案。
 
-## Features
+## 功能特色
 
-- One Oracle object per `.sql` file.
-- Stable output directories such as `TABLE/`, `VIEW/`, `PACKAGE_SPEC/`, and `PACKAGE_BODY/`.
-- `DBMS_METADATA` transform setup for `SEGMENT_ATTRIBUTES = FALSE`, `SQLTERMINATOR = TRUE`, `PRETTY = TRUE`, and `EMIT_SCHEMA = FALSE`.
-- Extra DDL cleanup for `EDITIONABLE`, redundant blank lines, simple quoted identifiers, and SQL keyword casing.
-- Concurrent export with a terminal progress bar.
-- Skips rewriting unchanged files.
+- 每個 Oracle 物件輸出成一個 `.sql` 檔案。
+- 使用穩定的輸出目錄，例如 `TABLE/`、`VIEW/`、`PACKAGE_SPEC/` 與 `PACKAGE_BODY/`。
+- 設定 `DBMS_METADATA` 轉換參數：`SEGMENT_ATTRIBUTES = FALSE`、`SQLTERMINATOR = TRUE`、`PRETTY = TRUE` 與 `EMIT_SCHEMA = FALSE`。
+- 額外清理 DDL 中的 `EDITIONABLE`、多餘空白行、簡單識別字引號，以及 SQL 關鍵字大小寫。
+- 支援併發匯出，並在終端機顯示進度列。
+- 內容未變更時會略過檔案重寫。
 
-## Install
+## 安裝
 
-From source:
+從原始碼安裝：
 
 ```sh
 cargo install --path .
 ```
 
-After releases are published, npm users can install the thin wrapper package:
+發布版本完成後，npm 使用者可以安裝輕量包裝套件：
 
 ```sh
 npm i -g oracode
 ```
 
-## Oracle client requirements
+## Oracle 用戶端需求
 
-The Rust `oracle` driver uses ODPI-C and needs Oracle Client libraries at runtime.
-Install Oracle Instant Client and make the library directory discoverable:
+Rust `oracle` 驅動程式使用 ODPI-C，執行時需要 Oracle Client 函式庫。
+請安裝 Oracle Instant Client，並讓系統能找到該函式庫目錄：
 
-- macOS: set `DYLD_LIBRARY_PATH` or ensure the Instant Client directory is on the loader path.
-- Linux: set `LD_LIBRARY_PATH=/path/to/instantclient`.
-- Windows: add the Instant Client directory to `PATH`.
+- macOS：設定 `DYLD_LIBRARY_PATH`，或確認 Instant Client 目錄位於載入器搜尋路徑中。
+- Linux：設定 `LD_LIBRARY_PATH=/path/to/instantclient`。
+- Windows：將 Instant Client 目錄加入 `PATH`。
 
-## Usage
+## 使用方式
 
 ```sh
 oracode \
@@ -47,7 +47,7 @@ oracode \
   --output ./oracode-out
 ```
 
-Use `--sid XE` instead of `--service-name` for SID-based connections.
-Use `--keep-quotes` when quoted identifiers must remain quoted.
+若使用 SID 連線，請改用 `--sid XE` 取代 `--service-name`。
+如果需要保留加上雙引號的識別字，請使用 `--keep-quotes`。
 
-All CLI options can also be supplied with `ORACODE_*` environment variables, for example `ORACODE_PASSWORD`.
+所有 CLI 選項也可以透過 `ORACODE_*` 環境變數提供，例如 `ORACODE_PASSWORD`。
