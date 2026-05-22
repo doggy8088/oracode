@@ -168,4 +168,35 @@ mod tests {
             "TABLE"
         );
     }
+
+    #[test]
+    fn maps_all_supported_oracle_object_types_to_metadata_types_and_output_dirs() {
+        let mappings = [
+            ("TABLE", ObjectKind::Table, "TABLE"),
+            ("VIEW", ObjectKind::View, "VIEW"),
+            ("PROCEDURE", ObjectKind::Procedure, "PROCEDURE"),
+            ("FUNCTION", ObjectKind::Function, "FUNCTION"),
+            ("PACKAGE", ObjectKind::PackageSpec, "PACKAGE_SPEC"),
+            ("PACKAGE BODY", ObjectKind::PackageBody, "PACKAGE_BODY"),
+            ("TRIGGER", ObjectKind::Trigger, "TRIGGER"),
+            ("SEQUENCE", ObjectKind::Sequence, "SEQUENCE"),
+            ("TYPE", ObjectKind::TypeSpec, "TYPE_SPEC"),
+            ("TYPE BODY", ObjectKind::TypeBody, "TYPE_BODY"),
+        ];
+
+        for (all_objects_type, expected_kind, expected_metadata_type) in mappings {
+            let kind = ObjectKind::from_all_objects_type(all_objects_type);
+
+            assert_eq!(kind, Some(expected_kind));
+            assert_eq!(expected_kind.metadata_type(), expected_metadata_type);
+            assert_eq!(expected_kind.output_dir(), expected_metadata_type);
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_or_differently_cased_object_types() {
+        for object_type in ["", "INDEX", "SYNONYM", "table", "Package Body"] {
+            assert_eq!(ObjectKind::from_all_objects_type(object_type), None);
+        }
+    }
 }

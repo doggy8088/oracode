@@ -1,12 +1,8 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use regex::{Captures, Regex};
+use regex::Regex;
 
-static EDITIONABLE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\s+\b(?:NON)?EDITIONABLE\b\s+").unwrap());
-static SIMPLE_QUOTED_IDENTIFIER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#""([A-Z][A-Z0-9_$#]*)""#).unwrap());
 static EXCESSIVE_BLANK_LINES_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
 static KEYWORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     [
@@ -93,17 +89,7 @@ pub struct SanitizeOptions {
 }
 
 pub fn sanitize_ddl(input: &str, options: SanitizeOptions) -> String {
-    let without_editionable = EDITIONABLE_RE.replace_all(input, " ");
-    let unquoted = if options.keep_quotes {
-        without_editionable.into_owned()
-    } else {
-        SIMPLE_QUOTED_IDENTIFIER_RE
-            .replace_all(&without_editionable, |captures: &Captures<'_>| {
-                captures[1].to_string()
-            })
-            .into_owned()
-    };
-    let normalized = normalize_keywords(&unquoted);
+    let normalized = normalize_keywords(input, options);
     let trimmed = trim_trailing_whitespace(&normalized);
     ensure_final_newline(
         EXCESSIVE_BLANK_LINES_RE
@@ -112,7 +98,7 @@ pub fn sanitize_ddl(input: &str, options: SanitizeOptions) -> String {
     )
 }
 
-fn normalize_keywords(input: &str) -> String {
+fn normalize_keywords(input: &str, options: SanitizeOptions) -> String {
     let mut output = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
 
@@ -123,8 +109,7 @@ fn normalize_keywords(input: &str) -> String {
                 copy_single_quoted(&mut chars, &mut output);
             }
             '"' => {
-                output.push(ch);
-                copy_double_quoted(&mut chars, &mut output);
+                copy_or_unquote_double_quoted(&mut chars, &mut output, options.keep_quotes);
             }
             '-' if chars.peek() == Some(&'-') => {
                 output.push(ch);
@@ -147,7 +132,9 @@ fn normalize_keywords(input: &str) -> String {
                 }
 
                 let upper = word.to_ascii_uppercase();
-                if KEYWORDS.contains(upper.as_str()) {
+                if is_editionable_keyword(upper.as_str()) {
+                    skip_following_horizontal_whitespace(&mut chars);
+                } else if KEYWORDS.contains(upper.as_str()) {
                     output.push_str(&upper);
                 } else {
                     output.push_str(&word);
@@ -158,6 +145,39 @@ fn normalize_keywords(input: &str) -> String {
     }
 
     output
+}
+
+fn copy_or_unquote_double_quoted<I>(
+    chars: &mut std::iter::Peekable<I>,
+    output: &mut String,
+    keep_quotes: bool,
+) where
+    I: Iterator<Item = char>,
+{
+    let mut identifier = String::new();
+    let mut terminated = false;
+
+    for ch in chars.by_ref() {
+        if ch == '"' {
+            terminated = true;
+            break;
+        }
+        identifier.push(ch);
+    }
+
+    if !terminated {
+        output.push('"');
+        output.push_str(&identifier);
+        return;
+    }
+
+    if keep_quotes || !is_safely_unquotable_identifier(identifier.as_str()) {
+        output.push('"');
+        output.push_str(&identifier);
+        output.push('"');
+    } else {
+        output.push_str(&identifier);
+    }
 }
 
 fn copy_single_quoted<I>(chars: &mut std::iter::Peekable<I>, output: &mut String)
@@ -172,18 +192,6 @@ where
             } else {
                 break;
             }
-        }
-    }
-}
-
-fn copy_double_quoted<I>(chars: &mut std::iter::Peekable<I>, output: &mut String)
-where
-    I: Iterator<Item = char>,
-{
-    for ch in chars.by_ref() {
-        output.push(ch);
-        if ch == '"' {
-            break;
         }
     }
 }
@@ -211,6 +219,32 @@ where
             break;
         }
         previous = ch;
+    }
+}
+
+fn is_safely_unquotable_identifier(identifier: &str) -> bool {
+    let mut chars = identifier.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    is_word_start(first)
+        && first.is_ascii_uppercase()
+        && chars.all(|ch| is_word_continue(ch) && !ch.is_ascii_lowercase())
+        && !KEYWORDS.contains(identifier)
+        && !is_editionable_keyword(identifier)
+}
+
+fn is_editionable_keyword(word: &str) -> bool {
+    matches!(word, "EDITIONABLE" | "NONEDITIONABLE")
+}
+
+fn skip_following_horizontal_whitespace<I>(chars: &mut std::iter::Peekable<I>)
+where
+    I: Iterator<Item = char>,
+{
+    while matches!(chars.peek(), Some(' ' | '\t')) {
+        chars.next();
     }
 }
 
@@ -275,6 +309,27 @@ select "EMPLOYEE_ID", "NAME" from "HR"."EMPLOYEES";
     }
 
     #[test]
+    fn does_not_remove_editionable_or_quotes_inside_literals_or_comments() {
+        let ddl = r#"create view "V" as select ' NONEDITIONABLE "ABC" ' as text from dual -- editionable "ABC"
+"#;
+
+        assert_eq!(
+            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            "CREATE VIEW V AS SELECT ' NONEDITIONABLE \"ABC\" ' AS text FROM dual -- editionable \"ABC\"\n"
+        );
+    }
+
+    #[test]
+    fn preserves_quoted_reserved_identifiers() {
+        let ddl = r#"create table "ORDER" ("DATE" number, "EMPLOYEE_ID" number);"#;
+
+        assert_eq!(
+            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            "CREATE TABLE \"ORDER\" (\"DATE\" NUMBER, EMPLOYEE_ID NUMBER);\n"
+        );
+    }
+
+    #[test]
     fn collapses_excessive_blank_lines() {
         let ddl =
             "create table t (id number);\n\n\n\nalter table t add constraint pk primary key (id);";
@@ -282,6 +337,56 @@ select "EMPLOYEE_ID", "NAME" from "HR"."EMPLOYEES";
         assert_eq!(
             sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
             "CREATE TABLE t (id NUMBER);\n\nALTER TABLE t ADD CONSTRAINT pk PRIMARY KEY (id);\n"
+        );
+    }
+
+    #[test]
+    fn preserves_unterminated_double_quoted_identifier() {
+        let ddl = r#"create table "BROKEN (id number);"#;
+
+        assert_eq!(
+            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            "CREATE TABLE \"BROKEN (id number);\n"
+        );
+    }
+
+    #[test]
+    fn keeps_quotes_for_identifiers_that_are_not_safely_unquotable() {
+        let ddl = r#"create table "MixedCase" ("HAS SPACE" number, "A$B#1" number);"#;
+
+        assert_eq!(
+            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            "CREATE TABLE \"MixedCase\" (\"HAS SPACE\" NUMBER, A$B#1 NUMBER);\n"
+        );
+    }
+
+    #[test]
+    fn trims_bom_outer_whitespace_and_trailing_line_whitespace() {
+        let ddl = "\u{feff}\n\ncreate table t (id number);   \n\t\n";
+
+        assert_eq!(
+            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            "CREATE TABLE t (id NUMBER);\n"
+        );
+    }
+
+    #[test]
+    fn preserves_escaped_quotes_inside_string_literals() {
+        let ddl = "create view v as select 'it''s a select' as text from dual;";
+
+        assert_eq!(
+            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            "CREATE VIEW v AS SELECT 'it''s a select' AS text FROM dual;\n"
+        );
+    }
+
+    #[test]
+    fn leaves_keywords_in_block_comments_unchanged() {
+        let ddl = "create table t (id number); /* select from where */";
+
+        assert_eq!(
+            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            "CREATE TABLE t (id NUMBER); /* select from where */\n"
         );
     }
 }

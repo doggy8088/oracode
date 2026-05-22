@@ -98,7 +98,68 @@ impl ConnectionConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConnectionConfig, DatabaseName};
+    use std::{
+        ffi::OsString,
+        path::PathBuf,
+        sync::{Mutex, MutexGuard},
+    };
+
+    use clap::{Parser, error::ErrorKind};
+
+    use super::{Cli, ConnectionConfig, DatabaseName};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<OsString>)>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn clear_oracode_env() -> Self {
+            const VARS: &[&str] = &[
+                "ORACODE_HOST",
+                "ORACODE_PORT",
+                "ORACODE_USER",
+                "ORACODE_PASSWORD",
+                "ORACODE_SID",
+                "ORACODE_SERVICE_NAME",
+                "ORACODE_SCHEMA",
+                "ORACODE_OUTPUT",
+                "ORACODE_KEEP_QUOTES",
+                "ORACODE_CONCURRENCY",
+            ];
+
+            let lock = ENV_LOCK.lock().expect("environment lock is poisoned");
+            let saved = VARS
+                .iter()
+                .map(|&name| (name, std::env::var_os(name)))
+                .collect::<Vec<_>>();
+
+            for &name in VARS {
+                // SAFETY: These tests serialize all ORACODE_* environment mutation with
+                // ENV_LOCK and restore the previous values before releasing it.
+                unsafe { std::env::remove_var(name) };
+            }
+
+            Self { saved, _lock: lock }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in &self.saved {
+                // SAFETY: The guard still holds ENV_LOCK while restoring values, so
+                // ORACODE_* environment mutation remains serialized for this module.
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn builds_service_name_descriptor() {
@@ -130,5 +191,177 @@ mod tests {
             config.connect_descriptor(),
             "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1522))(CONNECT_DATA=(SID=XE)))"
         );
+    }
+
+    #[test]
+    fn parses_sid_args_with_defaults() {
+        let _env = EnvGuard::clear_oracode_env();
+
+        let cli = Cli::try_parse_from([
+            "oracode",
+            "--host",
+            "db.example.test",
+            "--user",
+            "hr",
+            "--password",
+            "secret",
+            "--sid",
+            "XE",
+            "--schema",
+            "HR",
+        ])
+        .expect("valid SID arguments should parse");
+
+        assert_eq!(cli.host, "db.example.test");
+        assert_eq!(cli.port, 1521);
+        assert_eq!(cli.user, "hr");
+        assert_eq!(cli.password, "secret");
+        assert_eq!(cli.sid.as_deref(), Some("XE"));
+        assert_eq!(cli.service_name, None);
+        assert_eq!(cli.schema, "HR");
+        assert_eq!(cli.output, PathBuf::from("./oracode-out"));
+        assert!(!cli.keep_quotes);
+        assert_eq!(cli.concurrency, 8);
+        assert_eq!(
+            cli.connection_config(),
+            ConnectionConfig {
+                host: "db.example.test".to_string(),
+                port: 1521,
+                user: "hr".to_string(),
+                password: "secret".to_string(),
+                database: DatabaseName::Sid("XE".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_service_name_args_with_overrides() {
+        let _env = EnvGuard::clear_oracode_env();
+
+        let cli = Cli::try_parse_from([
+            "oracode",
+            "--host",
+            "db.example.test",
+            "--port",
+            "1522",
+            "--user",
+            "system",
+            "--password",
+            "secret",
+            "--service-name",
+            "orclpdb1",
+            "--schema",
+            "APP",
+            "--output",
+            "ddl",
+            "--keep-quotes",
+            "--concurrency",
+            "3",
+        ])
+        .expect("valid service-name arguments should parse");
+
+        assert_eq!(cli.host, "db.example.test");
+        assert_eq!(cli.port, 1522);
+        assert_eq!(cli.user, "system");
+        assert_eq!(cli.password, "secret");
+        assert_eq!(cli.sid, None);
+        assert_eq!(cli.service_name.as_deref(), Some("orclpdb1"));
+        assert_eq!(cli.schema, "APP");
+        assert_eq!(cli.output, PathBuf::from("ddl"));
+        assert!(cli.keep_quotes);
+        assert_eq!(cli.concurrency, 3);
+        assert_eq!(
+            cli.connection_config(),
+            ConnectionConfig {
+                host: "db.example.test".to_string(),
+                port: 1522,
+                user: "system".to_string(),
+                password: "secret".to_string(),
+                database: DatabaseName::ServiceName("orclpdb1".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_missing_database_identifier() {
+        let _env = EnvGuard::clear_oracode_env();
+
+        let error = Cli::try_parse_from([
+            "oracode",
+            "--host",
+            "db.example.test",
+            "--user",
+            "hr",
+            "--password",
+            "secret",
+            "--schema",
+            "HR",
+        ])
+        .expect_err("database identifier is required");
+
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn rejects_conflicting_database_identifiers() {
+        let _env = EnvGuard::clear_oracode_env();
+
+        let error = Cli::try_parse_from([
+            "oracode",
+            "--host",
+            "db.example.test",
+            "--user",
+            "hr",
+            "--password",
+            "secret",
+            "--sid",
+            "XE",
+            "--service-name",
+            "orclpdb1",
+            "--schema",
+            "HR",
+        ])
+        .expect_err("SID and service name are mutually exclusive");
+
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn rejects_invalid_numeric_arguments() {
+        let _env = EnvGuard::clear_oracode_env();
+
+        let invalid_port = Cli::try_parse_from([
+            "oracode",
+            "--host",
+            "db.example.test",
+            "--port",
+            "not-a-port",
+            "--user",
+            "hr",
+            "--password",
+            "secret",
+            "--sid",
+            "XE",
+            "--schema",
+            "HR",
+        ]);
+        assert!(invalid_port.is_err());
+
+        let invalid_concurrency = Cli::try_parse_from([
+            "oracode",
+            "--host",
+            "db.example.test",
+            "--user",
+            "hr",
+            "--password",
+            "secret",
+            "--sid",
+            "XE",
+            "--schema",
+            "HR",
+            "--concurrency",
+            "not-a-number",
+        ]);
+        assert!(invalid_concurrency.is_err());
     }
 }

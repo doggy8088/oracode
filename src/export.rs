@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -79,6 +80,8 @@ async fn export_objects(
     progress: ProgressBar,
 ) -> Result<ExportSummary> {
     let total = objects.len();
+    reject_filename_collisions(output.as_path(), &objects)?;
+
     let config = Arc::new(config);
     let schema = Arc::new(schema);
     let output = Arc::new(output);
@@ -154,7 +157,7 @@ pub async fn write_ddl_file(
     let directory = output_root.as_ref().join(object.kind.output_dir());
     tokio::fs::create_dir_all(&directory).await?;
 
-    let path = directory.join(format!("{}.sql", file_stem(object.name.as_str())));
+    let path = output_path(output_root.as_ref(), object);
     match tokio::fs::read(&path).await {
         Ok(existing) if existing == contents.as_bytes() => return Ok(WriteOutcome::Skipped),
         Ok(_) => {}
@@ -164,6 +167,31 @@ pub async fn write_ddl_file(
 
     tokio::fs::write(path, contents).await?;
     Ok(WriteOutcome::Written)
+}
+
+fn reject_filename_collisions(output_root: &Path, objects: &[DbObject]) -> Result<()> {
+    let mut paths: HashMap<PathBuf, &DbObject> = HashMap::new();
+
+    for object in objects {
+        let path = output_path(output_root, object);
+        if let Some(first) = paths.insert(path.clone(), object) {
+            return Err(Error::FilenameCollision {
+                path: path.display().to_string(),
+                first_object_type: first.kind.metadata_type(),
+                first_object_name: first.name.clone(),
+                second_object_type: object.kind.metadata_type(),
+                second_object_name: object.name.clone(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn output_path(output_root: &Path, object: &DbObject) -> PathBuf {
+    output_root
+        .join(object.kind.output_dir())
+        .join(format!("{}.sql", file_stem(object.name.as_str())))
 }
 
 fn progress_bar(total: usize) -> ProgressBar {
@@ -198,17 +226,50 @@ fn file_stem(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use crate::Error;
     use crate::db::{DbObject, ObjectKind};
 
-    use super::{WriteOutcome, file_stem, write_ddl_file};
+    use super::{WriteOutcome, file_stem, reject_filename_collisions, write_ddl_file};
+
+    fn unique_test_root(test_name: &str) -> std::path::PathBuf {
+        std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join("oracode-export-tests")
+            .join(format!(
+                "{}-{}",
+                test_name,
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+    }
 
     #[test]
     fn sanitizes_file_stems() {
         assert_eq!(file_stem("EMPLOYEES"), "EMPLOYEES");
         assert_eq!(file_stem("Weird Name/With:Chars"), "Weird_Name_With_Chars");
         assert_eq!(file_stem(""), "_");
+    }
+
+    #[test]
+    fn rejects_filename_collisions_before_export() {
+        let objects = vec![
+            DbObject {
+                name: "A/B".to_string(),
+                kind: ObjectKind::Table,
+            },
+            DbObject {
+                name: "A:B".to_string(),
+                kind: ObjectKind::Table,
+            },
+        ];
+
+        assert!(reject_filename_collisions(Path::new("out"), &objects).is_err());
     }
 
     #[tokio::test]
@@ -236,5 +297,111 @@ mod tests {
         assert_eq!(second, WriteOutcome::Skipped);
 
         tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn overwrites_changed_content_and_reports_written() {
+        let root = unique_test_root("overwrites-changed-content");
+        let object = DbObject {
+            name: "EMPLOYEES".to_string(),
+            kind: ObjectKind::Table,
+        };
+
+        let first = write_ddl_file(&root, &object, "CREATE TABLE EMPLOYEES (ID NUMBER);\n")
+            .await
+            .unwrap();
+        let second = write_ddl_file(
+            &root,
+            &object,
+            "CREATE TABLE EMPLOYEES (ID NUMBER, NAME VARCHAR2(30));\n",
+        )
+        .await
+        .unwrap();
+        let written = tokio::fs::read_to_string(root.join("TABLE").join("EMPLOYEES.sql"))
+            .await
+            .unwrap();
+
+        assert_eq!(first, WriteOutcome::Written);
+        assert_eq!(second, WriteOutcome::Written);
+        assert_eq!(
+            written,
+            "CREATE TABLE EMPLOYEES (ID NUMBER, NAME VARCHAR2(30));\n"
+        );
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn writes_sanitized_file_name_under_object_type_directory() {
+        let root = unique_test_root("writes-sanitized-file-name");
+        let object = DbObject {
+            name: "EMP/DETAIL:VIEW".to_string(),
+            kind: ObjectKind::View,
+        };
+
+        let outcome = write_ddl_file(
+            &root,
+            &object,
+            "CREATE VIEW EMP_DETAIL AS SELECT 1 FROM DUAL;\n",
+        )
+        .await
+        .unwrap();
+        let written = tokio::fs::read_to_string(root.join("VIEW").join("EMP_DETAIL_VIEW.sql"))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, WriteOutcome::Written);
+        assert_eq!(written, "CREATE VIEW EMP_DETAIL AS SELECT 1 FROM DUAL;\n");
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[test]
+    fn filename_collision_reports_both_conflicting_objects() {
+        let objects = vec![
+            DbObject {
+                name: "A/B".to_string(),
+                kind: ObjectKind::PackageSpec,
+            },
+            DbObject {
+                name: "A:B".to_string(),
+                kind: ObjectKind::PackageSpec,
+            },
+        ];
+
+        let error = reject_filename_collisions(Path::new("out"), &objects).unwrap_err();
+
+        match error {
+            Error::FilenameCollision {
+                path,
+                first_object_type,
+                first_object_name,
+                second_object_type,
+                second_object_name,
+            } => {
+                assert!(path.ends_with("PACKAGE_SPEC/A_B.sql"));
+                assert_eq!(first_object_type, "PACKAGE_SPEC");
+                assert_eq!(first_object_name, "A/B");
+                assert_eq!(second_object_type, "PACKAGE_SPEC");
+                assert_eq!(second_object_name, "A:B");
+            }
+            other => panic!("expected filename collision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn allows_same_file_stem_in_different_object_type_directories() {
+        let objects = vec![
+            DbObject {
+                name: "EMPLOYEES".to_string(),
+                kind: ObjectKind::Table,
+            },
+            DbObject {
+                name: "EMPLOYEES".to_string(),
+                kind: ObjectKind::View,
+            },
+        ];
+
+        reject_filename_collisions(Path::new("out"), &objects).unwrap();
     }
 }

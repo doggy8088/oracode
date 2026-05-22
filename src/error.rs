@@ -15,6 +15,17 @@ pub enum Error {
     #[error("concurrency must be greater than zero")]
     InvalidConcurrency,
 
+    #[error(
+        "filename collision at {path}: {first_object_type} {first_object_name} and {second_object_type} {second_object_name}"
+    )]
+    FilenameCollision {
+        path: String,
+        first_object_type: &'static str,
+        first_object_name: String,
+        second_object_type: &'static str,
+        second_object_name: String,
+    },
+
     #[error("failed to export {object_type} {object_name}: {source}")]
     ExportObject {
         object_type: &'static str,
