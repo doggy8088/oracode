@@ -56,3 +56,4 @@ oracode \
 
 - [技術架構與實作說明](docs/TECHNICAL.md)
 - [產品需求與開發藍圖](docs/PRD.md)
+- [發布流程](docs/RELEASE.md)
