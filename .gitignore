@@ -49,4 +49,8 @@ Cargo.lock
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
+# Local Oracle test/export artifacts
+.oracle-client/
+oracode-out/
+
 # End of https://www.toptal.com/developers/gitignore/api/rust,macos

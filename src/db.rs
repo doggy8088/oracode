@@ -94,6 +94,15 @@ impl OracleMetadataClient {
                 'TYPE BODY'
               )
               AND object_name NOT LIKE 'BIN$%'
+              AND (
+                object_type != 'SEQUENCE'
+                OR NOT EXISTS (
+                  SELECT 1
+                  FROM all_tab_identity_cols identity_cols
+                  WHERE identity_cols.owner = all_objects.owner
+                    AND identity_cols.sequence_name = all_objects.object_name
+                )
+              )
             ORDER BY object_type, object_name
         "#;
 
