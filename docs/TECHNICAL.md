@@ -447,7 +447,7 @@ cargo test
 
 - GitHub Release 上傳跨平台二進位檔。
 - 提供 shell / PowerShell 安裝腳本。
-- 透過 npm 發布薄包裝層，讓使用者可以用 `npm i -g oracode` 安裝。
+- 透過 npm 發布薄包裝層，讓使用者可以用 `npm i -g @willh/oracode` 安裝。
 
 注意：即使 `oracode` 本身可用單一二進位檔發布，目標機器仍須安裝 Oracle Instant Client，因為 Oracle 驅動程式執行時需要原生 client library。
 

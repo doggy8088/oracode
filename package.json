@@ -1,5 +1,5 @@
 {
-  "name": "oracode",
+  "name": "@willh/oracode",
   "version": "0.1.0",
   "description": "Database-as-code CLI for exporting clean, Git-friendly Oracle DDL.",
   "bin": {

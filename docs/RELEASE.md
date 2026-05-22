@@ -91,8 +91,8 @@ After both workflows finish:
 
 ```sh
 gh release view vX.Y.Z
-npm view oracode version
-npm i -g oracode
+npm view @willh/oracode version
+npm i -g @willh/oracode
 oracode --help
 ```
 

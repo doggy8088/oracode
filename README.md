@@ -22,7 +22,7 @@ cargo install --path .
 發布版本完成後，npm 使用者可以安裝輕量包裝套件：
 
 ```sh
-npm i -g oracode
+npm i -g @willh/oracode
 ```
 
 ## Oracle 用戶端需求
