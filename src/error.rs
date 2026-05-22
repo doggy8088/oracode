@@ -12,6 +12,12 @@ pub enum Error {
     #[error("unsupported Oracle object type: {0}")]
     UnsupportedObjectType(String),
 
+    #[error("schema not found: {0}")]
+    SchemaNotFound(String),
+
+    #[error("invalid object selector: {0}")]
+    InvalidObjectSelector(String),
+
     #[error("concurrency must be greater than zero")]
     InvalidConcurrency,
 

@@ -7,7 +7,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::cli::{Cli, ConnectionConfig};
-use crate::db::{DbObject, OracleMetadataClient};
+use crate::db::{DbObject, MetadataOptions, ObjectSelection, OracleMetadataClient};
 use crate::sanitize::{SanitizeOptions, sanitize_ddl};
 use crate::{Error, Result};
 
@@ -24,30 +24,46 @@ pub enum WriteOutcome {
     Skipped,
 }
 
+struct ExportRequest {
+    config: ConnectionConfig,
+    metadata_options: MetadataOptions,
+    schema: String,
+    output: PathBuf,
+    sanitize_options: SanitizeOptions,
+    concurrency: usize,
+}
+
 pub async fn run(cli: Cli) -> Result<ExportSummary> {
     if cli.concurrency == 0 {
         return Err(Error::InvalidConcurrency);
     }
 
     let config = cli.connection_config();
-    let schema = cli.schema.to_ascii_uppercase();
+    let schema = cli.schema;
     let output = cli.output;
-    let keep_quotes = cli.keep_quotes;
+    let metadata_options = MetadataOptions {
+        lossless: cli.lossless,
+    };
+    let sanitize_options = SanitizeOptions {
+        keep_quotes: cli.keep_quotes || cli.lossless,
+        preserve_editioning: cli.lossless,
+    };
+    let object_selection = ObjectSelection::from_selectors(&cli.include, &cli.exclude)?;
     let concurrency = cli.concurrency;
 
-    let objects = list_objects(config.clone(), schema.clone()).await?;
+    let (schema, objects) =
+        list_objects(config.clone(), metadata_options, schema, object_selection).await?;
     let total = objects.len();
     let progress = progress_bar(total);
-    let summary = export_objects(
+    let request = ExportRequest {
         config,
+        metadata_options,
         schema,
         output,
-        keep_quotes,
+        sanitize_options,
         concurrency,
-        objects,
-        progress.clone(),
-    )
-    .await;
+    };
+    let summary = export_objects(request, objects, progress.clone()).await;
     progress.finish_and_clear();
 
     match summary {
@@ -62,30 +78,35 @@ pub async fn run(cli: Cli) -> Result<ExportSummary> {
     }
 }
 
-async fn list_objects(config: ConnectionConfig, schema: String) -> Result<Vec<DbObject>> {
+async fn list_objects(
+    config: ConnectionConfig,
+    metadata_options: MetadataOptions,
+    schema: String,
+    object_selection: ObjectSelection,
+) -> Result<(String, Vec<DbObject>)> {
     tokio::task::spawn_blocking(move || {
-        let client = OracleMetadataClient::connect(&config)?;
-        client.list_objects(schema.as_str())
+        let client = OracleMetadataClient::connect(&config, metadata_options)?;
+        let schema = client.resolve_schema(schema.as_str())?;
+        let objects = client.list_objects(schema.as_str(), &object_selection)?;
+        Ok((schema, objects))
     })
     .await?
 }
 
 async fn export_objects(
-    config: ConnectionConfig,
-    schema: String,
-    output: PathBuf,
-    keep_quotes: bool,
-    concurrency: usize,
+    request: ExportRequest,
     objects: Vec<DbObject>,
     progress: ProgressBar,
 ) -> Result<ExportSummary> {
     let total = objects.len();
-    reject_filename_collisions(output.as_path(), &objects)?;
+    reject_filename_collisions(request.output.as_path(), &objects)?;
 
-    let config = Arc::new(config);
-    let schema = Arc::new(schema);
-    let output = Arc::new(output);
-    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let config = Arc::new(request.config);
+    let schema = Arc::new(request.schema);
+    let output = Arc::new(request.output);
+    let metadata_options = request.metadata_options;
+    let sanitize_options = request.sanitize_options;
+    let semaphore = Arc::new(Semaphore::new(request.concurrency));
     let mut tasks = JoinSet::new();
 
     for object in objects {
@@ -100,13 +121,20 @@ async fn export_objects(
             let object_type = object.kind.metadata_type();
             let object_name = object.name.clone();
 
-            let result = export_one(config, schema, output, keep_quotes, object)
-                .await
-                .map_err(|source| Error::ExportObject {
-                    object_type,
-                    object_name,
-                    source: Box::new(source),
-                });
+            let result = export_one(
+                config,
+                metadata_options,
+                schema,
+                output,
+                sanitize_options,
+                object,
+            )
+            .await
+            .map_err(|source| Error::ExportObject {
+                object_type,
+                object_name,
+                source: Box::new(source),
+            });
             progress.inc(1);
             result
         });
@@ -130,9 +158,10 @@ async fn export_objects(
 
 async fn export_one(
     config: Arc<ConnectionConfig>,
+    metadata_options: MetadataOptions,
     schema: Arc<String>,
     output: Arc<PathBuf>,
-    keep_quotes: bool,
+    sanitize_options: SanitizeOptions,
     object: DbObject,
 ) -> Result<WriteOutcome> {
     let ddl_object = object.clone();
@@ -140,12 +169,12 @@ async fn export_one(
     let schema_for_fetch = (*schema).clone();
 
     let ddl = tokio::task::spawn_blocking(move || {
-        let client = OracleMetadataClient::connect(&config)?;
+        let client = OracleMetadataClient::connect(&config, metadata_options)?;
         client.get_ddl(schema_for_fetch.as_str(), &ddl_object)
     })
     .await??;
 
-    let sanitized = sanitize_ddl(&ddl, SanitizeOptions { keep_quotes });
+    let sanitized = sanitize_ddl(&ddl, sanitize_options);
     write_ddl_file(output.as_ref(), &object, sanitized.as_str()).await
 }
 
@@ -274,13 +303,7 @@ mod tests {
 
     #[tokio::test]
     async fn writes_then_skips_unchanged_content() {
-        let root = std::env::temp_dir().join(format!(
-            "oracode-test-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = unique_test_root("writes-then-skips-unchanged-content");
         let object = DbObject {
             name: "EMPLOYEES".to_string(),
             kind: ObjectKind::Table,
@@ -295,6 +318,71 @@ mod tests {
 
         assert_eq!(first, WriteOutcome::Written);
         assert_eq!(second, WriteOutcome::Skipped);
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn writes_object_grants_under_object_grant_directory() {
+        let root = unique_test_root("writes-object-grants");
+        let object = DbObject {
+            name: "EMPLOYEES".to_string(),
+            kind: ObjectKind::ObjectGrant,
+        };
+
+        let outcome = write_ddl_file(&root, &object, "GRANT SELECT ON EMPLOYEES TO REPORTING;\n")
+            .await
+            .unwrap();
+        let written = tokio::fs::read_to_string(root.join("OBJECT_GRANT").join("EMPLOYEES.sql"))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, WriteOutcome::Written);
+        assert_eq!(written, "GRANT SELECT ON EMPLOYEES TO REPORTING;\n");
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn writes_dependent_metadata_under_its_own_directory() {
+        let root = unique_test_root("writes-dependent-metadata");
+        let constraint = DbObject {
+            name: "EMPLOYEES".to_string(),
+            kind: ObjectKind::ObjectConstraint,
+        };
+        let comment = DbObject {
+            name: "EMPLOYEES".to_string(),
+            kind: ObjectKind::ObjectComment,
+        };
+
+        write_ddl_file(
+            &root,
+            &constraint,
+            "ALTER TABLE EMPLOYEES ADD CONSTRAINT EMP_PK PRIMARY KEY (ID);\n",
+        )
+        .await
+        .unwrap();
+        write_ddl_file(
+            &root,
+            &comment,
+            "COMMENT ON TABLE EMPLOYEES IS 'Employees';\n",
+        )
+        .await
+        .unwrap();
+
+        let constraint_sql =
+            tokio::fs::read_to_string(root.join("CONSTRAINT").join("EMPLOYEES.sql"))
+                .await
+                .unwrap();
+        let comment_sql = tokio::fs::read_to_string(root.join("COMMENT").join("EMPLOYEES.sql"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            constraint_sql,
+            "ALTER TABLE EMPLOYEES ADD CONSTRAINT EMP_PK PRIMARY KEY (ID);\n"
+        );
+        assert_eq!(comment_sql, "COMMENT ON TABLE EMPLOYEES IS 'Employees';\n");
 
         tokio::fs::remove_dir_all(root).await.unwrap();
     }

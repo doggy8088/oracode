@@ -60,9 +60,9 @@
 這是 `oracode` 的核心價值所在，處理 Oracle 內建功能無法解決的雜訊。
 
 * **3.1 字串淨化器 (Rust Sanitizer)：**
-* 移除 `EDITIONABLE` 關鍵字（使用 Regex）。
+* 使用 lexical scanner 移除 `EDITIONABLE` 關鍵字，避免誤改字串、雙引號識別字與註解。
 * 處理多餘的空行 (連續三個換行縮減為兩個)。
-* 移除物件名稱外的雙引號 (例如 `"EMPLOYEES"` -> `EMPLOYEES`)，若有保留字需求需提供設定開關 `--keep-quotes`。
+* 移除物件名稱外的雙引號 (例如 `"EMPLOYEES"` -> `EMPLOYEES`)，若有保留字需求需提供設定開關 `--keep-quotes`，若需保留 editioning、schema prefix 與 physical clauses 則使用 `--lossless`。
 
 
 * **3.2 關鍵字正規化 (大寫強制轉換)：**
@@ -79,7 +79,7 @@
 
 
 * **4.2 併發執行與進度顯示：**
-* 利用 `tokio::spawn` 併發呼叫 `GET_DDL` 並處理字串。
+* 利用 `tokio::spawn` 併發呼叫 `GET_DDL`（constraints、comments、grants 等 dependent metadata 使用 `GET_DEPENDENT_DDL`）並處理字串。
 * 整合 `indicatif` 顯示終端機進度條 (例如：`[00:02:15] [####.......] 450/1200 objects exported`)。
 
 

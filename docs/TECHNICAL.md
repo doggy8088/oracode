@@ -140,7 +140,9 @@ CLI 進入點，責任很薄：
 
 - `ObjectKind`：抽象化支援的 Oracle 物件類型。
 - `DbObject`：代表待匯出的資料庫物件，包含名稱與物件類型。
-- `OracleMetadataClient`：封裝 Oracle 連線、Metadata 設定與 DDL 擷取。
+- `MetadataOptions` / `DbCapabilities`：描述 lossless 匯出設定與資料庫能力偵測結果。
+- `ObjectSelection`：根據 `--include` / `--exclude` 決定要列舉的物件類型。
+- `OracleMetadataClient`：封裝 Oracle 連線、Metadata 設定、能力偵測、Schema 解析與 DDL 擷取。
 
 支援的物件類型：
 
@@ -155,9 +157,23 @@ CLI 進入點，責任很薄：
 - `TYPE`
 - `TYPE BODY`
 
+可透過 `--include` opt-in 的物件類型：
+
+- `INDEX`
+- `CONSTRAINT`
+- `REF_CONSTRAINT`
+- `COMMENT`
+- `SYNONYM`
+- `MATERIALIZED VIEW`
+- `DATABASE LINK`
+- `OBJECT_GRANT`
+
+其中 `DATABASE LINK` 可能涉及敏感連線資訊，預設不匯出。
+`CONSTRAINT`、`REF_CONSTRAINT`、`COMMENT` 與 `OBJECT_GRANT` 是 dependent metadata，不會從 `ALL_OBJECTS` 直接列出。
+
 #### Metadata transform 設定
 
-建立連線後會設定：
+建立連線後會以 best-effort 逐一設定：
 
 ```sql
 DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SEGMENT_ATTRIBUTES', FALSE);
@@ -173,7 +189,11 @@ DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'EMIT_SCHEMA'
 - `PRETTY = TRUE`：讓 Oracle 產生較可讀的 DDL。
 - `EMIT_SCHEMA = FALSE`：避免輸出 schema 前綴，提升跨環境可攜性。
 
+每個 transform 會獨立設定；若舊版 Oracle 不支援某個 transform，會記錄該 transform 的失敗結果，但不讓整個連線設定直接失敗。若使用 `--lossless`，則不設定 `SEGMENT_ATTRIBUTES = FALSE` 與 `EMIT_SCHEMA = FALSE`，以保留 physical clauses 與 schema 前綴。
+
 #### 物件清單查詢
+
+工具會先解析 Schema owner：exact match 優先，找不到時才對未加雙引號的輸入嘗試 uppercase fallback。解析後會把 owner 原樣傳給 `ALL_OBJECTS` 與 `DBMS_METADATA.GET_DDL`，避免破壞 quoted/mixed-case schema。
 
 工具會從 `ALL_OBJECTS` 讀取指定 Schema 的支援物件。查詢時會排除：
 
@@ -181,6 +201,12 @@ DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'EMIT_SCHEMA'
 - Oracle identity 欄位自動產生的 sequence
 
 排除 identity sequence 的原因是這類 sequence 由 Oracle 內部管理，常見名稱如 `ISEQ$$_...`。直接對它呼叫 `DBMS_METADATA.GET_DDL` 可能產生 `ORA-31603`，而且 identity sequence 本身已包含在 table DDL 語意中，不應作為獨立業務物件輸出。
+
+為支援 pre-12c，程式不會無條件引用 `ALL_TAB_IDENTITY_COLS`。它會先 probe 該 view 是否可用；若不可用，僅使用 escaped `ISEQ$$\_%` pattern 排除 identity-like sequence 名稱。若可用，才加入 `ALL_TAB_IDENTITY_COLS` anti-join。
+
+若使用 `--include constraints`，工具會查詢 `ALL_CONSTRAINTS`，為本次已選取的 table/view/materialized view 加入 `CONSTRAINT` 與 `REF_CONSTRAINT` dependent metadata 匯出項目。若使用 `--include comments`，工具會查詢 `ALL_TAB_COMMENTS` 與 `ALL_COL_COMMENTS`，為有 table/column comments 的已選取物件加入 `COMMENT` 匯出項目。
+
+若使用 `--include grants`，工具會另外查詢 `ALL_TAB_PRIVS` + `ALL_OBJECTS`，只為本次已選取的 Schema-owned 物件加入 `OBJECT_GRANT` 匯出項目。方向語意是 outbound object grants：匯出「目標 Schema 擁有的物件授權給其他 grantee」；不包含授予目標 Schema 的 inbound grants、system grants 或 role grants。
 
 ### `src/export.rs`
 
@@ -193,7 +219,7 @@ DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'EMIT_SCHEMA'
 3. 建立進度列。
 4. 使用 `tokio::sync::Semaphore` 控制最大併發數。
 5. 使用 `tokio::task::JoinSet` 管理每個物件的匯出任務。
-6. 對每個物件建立獨立 Oracle 連線並呼叫 `GET_DDL`。
+6. 對每個物件建立獨立 Oracle 連線；一般物件呼叫 `GET_DDL`，`OBJECT_GRANT` 呼叫 `GET_DEPENDENT_DDL`。
 7. 清理 DDL。
 8. 寫入對應檔案。
 9. 統計寫入與略過數量。
@@ -244,6 +270,7 @@ oracode ... --concurrency 16
 - 移除 `EDITIONABLE` / `NONEDITIONABLE`。
 - 將簡單雙引號識別字改成未加引號形式，例如 `"EMPLOYEES"` 變成 `EMPLOYEES`。
 - 若使用 `--keep-quotes`，則保留雙引號識別字。
+- 若使用 `--lossless`，則保留雙引號識別字與 `EDITIONABLE` / `NONEDITIONABLE`。
 - 將 SQL 關鍵字正規化為大寫。
 - 保留字串常值、雙引號內容與註解中的原始文字。
 - 移除行尾空白。
@@ -271,6 +298,8 @@ Sanitizer 會逐字元掃描 DDL，而不是單純用全域替換，原因是必
 - 檔案 I/O 錯誤
 - Tokio task join 錯誤
 - 不支援的 Oracle 物件類型
+- 找不到指定 Schema
+- 無效的 `--include` / `--exclude` 物件 selector
 - 無效併發設定
 - 單一物件匯出失敗
 
@@ -298,6 +327,14 @@ failed to export TABLE EMPLOYEES: ...
 | SEQUENCE | `SEQUENCE/` |
 | TYPE | `TYPE_SPEC/` |
 | TYPE BODY | `TYPE_BODY/` |
+| INDEX | `INDEX/` |
+| CONSTRAINT | `CONSTRAINT/` |
+| REF_CONSTRAINT | `REF_CONSTRAINT/` |
+| COMMENT | `COMMENT/` |
+| SYNONYM | `SYNONYM/` |
+| MATERIALIZED VIEW | `MATERIALIZED_VIEW/` |
+| DATABASE LINK | `DB_LINK/` |
+| OBJECT_GRANT | `OBJECT_GRANT/` |
 
 檔名會使用物件名稱，並將不適合檔名的字元替換成 `_`。
 
@@ -434,6 +471,12 @@ cargo test
 - 大型 Schema 的壓力測試。
 - 特殊命名、保留字、混合大小寫識別字測試。
 
+跨版本 Oracle 驗證規劃與可重用 SQL fixtures 見
+[`docs/ORACLE_VERSION_TEST_MATRIX.md`](ORACLE_VERSION_TEST_MATRIX.md)。該計畫將
+9i/10g、11g、12c、18c、19c、21c 與 23ai 分成無資料庫 CI、目前 XE smoke、
+maintained-version self-hosted，以及 legacy manual tiers；實際 snapshot 輸出應放在
+已忽略的 `oracle-test-runs/`，避免把產物提交到版本庫。
+
 ## 發布設計
 
 `Cargo.toml` 已設定 `cargo-dist` metadata，規劃目標平台包含：
@@ -455,7 +498,7 @@ cargo test
 
 ### Oracle 權限
 
-匯出指定 Schema 時，使用者需要能讀取 `ALL_OBJECTS` 與透過 `DBMS_METADATA.GET_DDL` 取得物件 DDL。
+匯出指定 Schema 時，使用者需要能讀取 `ALL_OBJECTS` 與透過 `DBMS_METADATA.GET_DDL` 取得物件 DDL。若啟用 dependent metadata，還需要對應 dictionary view 與 `GET_DEPENDENT_DDL` 權限：`--include constraints` 使用 `ALL_CONSTRAINTS` 與 `CONSTRAINT` / `REF_CONSTRAINT`，`--include comments` 使用 `ALL_TAB_COMMENTS` / `ALL_COL_COMMENTS` 與 `COMMENT`，`--include grants` 使用 `ALL_TAB_PRIVS` 與 `OBJECT_GRANT`。
 
 若匯出非自身 Schema，可能需要額外權限，例如：
 
@@ -481,6 +524,8 @@ cargo test
 oracode ... --keep-quotes
 ```
 
+若需要更接近原始 DDL，請使用 `--lossless`。此模式會保留雙引號、editioning clause、schema 前綴與 DBMS_METADATA 預設輸出的 physical clauses；它仍會做基本 whitespace 與 keyword normalization，因此不是 byte-for-byte dump。
+
 ### 密碼處理
 
 CLI 支援 `--password` 與 `ORACODE_PASSWORD`。在 shell history 敏感的環境中，建議使用環境變數：
@@ -492,11 +537,10 @@ oracode --host ... --user ... --service-name ... --schema ...
 
 ## 未來可擴充方向
 
-- 新增 include/exclude 物件類型參數。
 - 新增 include/exclude 物件名稱 pattern。
 - 新增 DDL snapshot 測試。
 - 支援設定檔，例如 `oracode.toml`。
-- 支援匯出 grants、synonyms、materialized views、database links 等更多物件。
+- 支援更多 dependent DDL，例如 triggers on nested tables 或未來 Oracle 新增的 dependent metadata。
 - 支援產出 manifest，記錄每次匯出的物件、雜湊與時間。
 - 支援 dry-run，比對資料庫與本機輸出差異但不寫入。
 - 支援 JSON / SARIF 格式報告，方便 CI 使用。

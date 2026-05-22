@@ -86,6 +86,7 @@ static KEYWORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SanitizeOptions {
     pub keep_quotes: bool,
+    pub preserve_editioning: bool,
 }
 
 pub fn sanitize_ddl(input: &str, options: SanitizeOptions) -> String {
@@ -133,7 +134,11 @@ fn normalize_keywords(input: &str, options: SanitizeOptions) -> String {
 
                 let upper = word.to_ascii_uppercase();
                 if is_editionable_keyword(upper.as_str()) {
-                    skip_following_horizontal_whitespace(&mut chars);
+                    if options.preserve_editioning {
+                        output.push_str(&upper);
+                    } else {
+                        skip_following_horizontal_whitespace(&mut chars);
+                    }
                 } else if KEYWORDS.contains(upper.as_str()) {
                     output.push_str(&upper);
                 } else {
@@ -274,6 +279,20 @@ fn is_word_continue(ch: char) -> bool {
 mod tests {
     use super::{SanitizeOptions, sanitize_ddl};
 
+    fn options(keep_quotes: bool) -> SanitizeOptions {
+        SanitizeOptions {
+            keep_quotes,
+            preserve_editioning: false,
+        }
+    }
+
+    fn lossless_options() -> SanitizeOptions {
+        SanitizeOptions {
+            keep_quotes: true,
+            preserve_editioning: true,
+        }
+    }
+
     #[test]
     fn removes_editionable_and_simple_identifier_quotes() {
         let ddl = r#"
@@ -282,7 +301,7 @@ select "EMPLOYEE_ID", "NAME" from "HR"."EMPLOYEES";
 "#;
 
         assert_eq!(
-            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            sanitize_ddl(ddl, options(false)),
             "CREATE OR REPLACE VIEW EMPLOYEES AS\nSELECT EMPLOYEE_ID, NAME FROM HR.EMPLOYEES;\n"
         );
     }
@@ -292,8 +311,28 @@ select "EMPLOYEE_ID", "NAME" from "HR"."EMPLOYEES";
         let ddl = r#"create table "ORDER" ("ID" number);"#;
 
         assert_eq!(
-            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: true }),
+            sanitize_ddl(ddl, options(true)),
             "CREATE TABLE \"ORDER\" (\"ID\" NUMBER);\n"
+        );
+    }
+
+    #[test]
+    fn keep_quotes_does_not_preserve_editioning() {
+        let ddl = r#"create or replace editionable view "EMPLOYEES" as select 1 from dual;"#;
+
+        assert_eq!(
+            sanitize_ddl(ddl, options(true)),
+            "CREATE OR REPLACE VIEW \"EMPLOYEES\" AS SELECT 1 FROM dual;\n"
+        );
+    }
+
+    #[test]
+    fn lossless_options_preserve_quotes_and_editioning() {
+        let ddl = r#"create or replace editionable view "EMPLOYEES" as select 1 from dual;"#;
+
+        assert_eq!(
+            sanitize_ddl(ddl, lossless_options()),
+            "CREATE OR REPLACE EDITIONABLE VIEW \"EMPLOYEES\" AS SELECT 1 FROM dual;\n"
         );
     }
 
@@ -303,7 +342,7 @@ select "EMPLOYEE_ID", "NAME" from "HR"."EMPLOYEES";
             "create view v as select 'select from' as text from dual -- where stays lowercase\n";
 
         assert_eq!(
-            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            sanitize_ddl(ddl, options(false)),
             "CREATE VIEW v AS SELECT 'select from' AS text FROM dual -- where stays lowercase\n"
         );
     }
@@ -314,7 +353,7 @@ select "EMPLOYEE_ID", "NAME" from "HR"."EMPLOYEES";
 "#;
 
         assert_eq!(
-            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            sanitize_ddl(ddl, options(false)),
             "CREATE VIEW V AS SELECT ' NONEDITIONABLE \"ABC\" ' AS text FROM dual -- editionable \"ABC\"\n"
         );
     }
@@ -324,7 +363,7 @@ select "EMPLOYEE_ID", "NAME" from "HR"."EMPLOYEES";
         let ddl = r#"create table "ORDER" ("DATE" number, "EMPLOYEE_ID" number);"#;
 
         assert_eq!(
-            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            sanitize_ddl(ddl, options(false)),
             "CREATE TABLE \"ORDER\" (\"DATE\" NUMBER, EMPLOYEE_ID NUMBER);\n"
         );
     }
@@ -335,7 +374,7 @@ select "EMPLOYEE_ID", "NAME" from "HR"."EMPLOYEES";
             "create table t (id number);\n\n\n\nalter table t add constraint pk primary key (id);";
 
         assert_eq!(
-            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            sanitize_ddl(ddl, options(false)),
             "CREATE TABLE t (id NUMBER);\n\nALTER TABLE t ADD CONSTRAINT pk PRIMARY KEY (id);\n"
         );
     }
@@ -345,7 +384,7 @@ select "EMPLOYEE_ID", "NAME" from "HR"."EMPLOYEES";
         let ddl = r#"create table "BROKEN (id number);"#;
 
         assert_eq!(
-            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            sanitize_ddl(ddl, options(false)),
             "CREATE TABLE \"BROKEN (id number);\n"
         );
     }
@@ -355,7 +394,7 @@ select "EMPLOYEE_ID", "NAME" from "HR"."EMPLOYEES";
         let ddl = r#"create table "MixedCase" ("HAS SPACE" number, "A$B#1" number);"#;
 
         assert_eq!(
-            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            sanitize_ddl(ddl, options(false)),
             "CREATE TABLE \"MixedCase\" (\"HAS SPACE\" NUMBER, A$B#1 NUMBER);\n"
         );
     }
@@ -365,7 +404,7 @@ select "EMPLOYEE_ID", "NAME" from "HR"."EMPLOYEES";
         let ddl = "\u{feff}\n\ncreate table t (id number);   \n\t\n";
 
         assert_eq!(
-            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            sanitize_ddl(ddl, options(false)),
             "CREATE TABLE t (id NUMBER);\n"
         );
     }
@@ -375,7 +414,7 @@ select "EMPLOYEE_ID", "NAME" from "HR"."EMPLOYEES";
         let ddl = "create view v as select 'it''s a select' as text from dual;";
 
         assert_eq!(
-            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            sanitize_ddl(ddl, options(false)),
             "CREATE VIEW v AS SELECT 'it''s a select' AS text FROM dual;\n"
         );
     }
@@ -385,7 +424,7 @@ select "EMPLOYEE_ID", "NAME" from "HR"."EMPLOYEES";
         let ddl = "create table t (id number); /* select from where */";
 
         assert_eq!(
-            sanitize_ddl(ddl, SanitizeOptions { keep_quotes: false }),
+            sanitize_ddl(ddl, options(false)),
             "CREATE TABLE t (id NUMBER); /* select from where */\n"
         );
     }

@@ -48,5 +48,6 @@ target/
 # Local Oracle test/export artifacts
 .oracle-client/
 oracode-out/
+oracle-test-runs/
 
 # End of https://www.toptal.com/developers/gitignore/api/rust,macos

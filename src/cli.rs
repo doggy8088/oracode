@@ -45,6 +45,32 @@ pub struct Cli {
     #[arg(long, env = "ORACODE_KEEP_QUOTES", default_value_t = false)]
     pub keep_quotes: bool,
 
+    #[arg(
+        long,
+        env = "ORACODE_LOSSLESS",
+        default_value_t = false,
+        help = "Preserve quotes, editioning, schema prefixes, and physical clauses"
+    )]
+    pub lossless: bool,
+
+    #[arg(
+        long,
+        env = "ORACODE_INCLUDE",
+        value_delimiter = ',',
+        value_name = "OBJECTS",
+        help = "Add optional object types such as indexes,constraints,comments,grants,synonyms,mviews,db-links"
+    )]
+    pub include: Vec<String>,
+
+    #[arg(
+        long,
+        env = "ORACODE_EXCLUDE",
+        value_delimiter = ',',
+        value_name = "OBJECTS",
+        help = "Remove object types from the selected export set"
+    )]
+    pub exclude: Vec<String>,
+
     #[arg(long, env = "ORACODE_CONCURRENCY", default_value_t = 8)]
     pub concurrency: usize,
 }
@@ -127,6 +153,9 @@ mod tests {
                 "ORACODE_SCHEMA",
                 "ORACODE_OUTPUT",
                 "ORACODE_KEEP_QUOTES",
+                "ORACODE_LOSSLESS",
+                "ORACODE_INCLUDE",
+                "ORACODE_EXCLUDE",
                 "ORACODE_CONCURRENCY",
             ];
 
@@ -221,6 +250,9 @@ mod tests {
         assert_eq!(cli.schema, "HR");
         assert_eq!(cli.output, PathBuf::from("./oracode-out"));
         assert!(!cli.keep_quotes);
+        assert!(!cli.lossless);
+        assert!(cli.include.is_empty());
+        assert!(cli.exclude.is_empty());
         assert_eq!(cli.concurrency, 8);
         assert_eq!(
             cli.connection_config(),
@@ -255,6 +287,11 @@ mod tests {
             "--output",
             "ddl",
             "--keep-quotes",
+            "--lossless",
+            "--include",
+            "indexes,constraints,comments,grants",
+            "--exclude",
+            "trigger",
             "--concurrency",
             "3",
         ])
@@ -269,6 +306,12 @@ mod tests {
         assert_eq!(cli.schema, "APP");
         assert_eq!(cli.output, PathBuf::from("ddl"));
         assert!(cli.keep_quotes);
+        assert!(cli.lossless);
+        assert_eq!(
+            cli.include,
+            ["indexes", "constraints", "comments", "grants"]
+        );
+        assert_eq!(cli.exclude, ["trigger"]);
         assert_eq!(cli.concurrency, 3);
         assert_eq!(
             cli.connection_config(),
